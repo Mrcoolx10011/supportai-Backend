@@ -7,7 +7,9 @@ const ChatConversation = require('../models/ChatConversation');
 const ChatMessage = require('../models/ChatMessage');
 const KnowledgeBaseItem = require('../models/KnowledgeBaseItem');
 const CannedResponse = require('../models/CannedResponse');
+const User = require('../models/User');
 const { sendTicketCreatedEmail, sendTicketUpdateEmail, sendTicketResolvedEmail } = require('../utils/emailService');
+const { createKBFromResolvedTicket } = require('../utils/kbAutoUpdate');
 
 const router = express.Router();
 
@@ -108,6 +110,7 @@ const createCRUDRoutes = (Model, modelName) => {
             id: kbItem._id,
             question: kbItem.title,
             answer: kbItem.content,
+            is_active: kbItem.status === 'published',
             created_date: kbItem.createdAt,
             updated_date: kbItem.updatedAt
           };
@@ -196,6 +199,7 @@ const createCRUDRoutes = (Model, modelName) => {
           id: kbItem._id,
           question: kbItem.title,
           answer: kbItem.content,
+          is_active: kbItem.status === 'published',
           created_date: kbItem.createdAt,
           updated_date: kbItem.updatedAt
         };
@@ -250,6 +254,26 @@ const createCRUDRoutes = (Model, modelName) => {
         // Add company field from the name
         if (data.name && !data.company) {
           data.company = data.name;
+        }
+      }
+      
+      // Handle field mapping for KnowledgeBaseItem model
+      if (modelName === 'KnowledgeBaseItem') {
+        // Map frontend fields to backend fields
+        if (data.question && !data.title) {
+          data.title = data.question;
+          delete data.question;
+        }
+        if (data.answer && !data.content) {
+          data.content = data.answer;
+          delete data.answer;
+        }
+        // Ensure required fields are present
+        if (!data.title && data.name) {
+          data.title = data.name;
+        }
+        if (!data.content && data.description) {
+          data.content = data.description;
         }
       }
       
@@ -356,6 +380,11 @@ const createCRUDRoutes = (Model, modelName) => {
         updates.last_updated_by = req.user.userId;
       }
 
+      // Set resolved_at timestamp if ticket is being resolved
+      if (modelName === 'Ticket' && updates.status === 'resolved' && !updates.resolved_at) {
+        updates.resolved_at = new Date();
+      }
+
       const item = await Model.findByIdAndUpdate(
         req.params.id,
         updates,
@@ -370,6 +399,18 @@ const createCRUDRoutes = (Model, modelName) => {
       if (modelName === 'Ticket' && item.customer_email) {
         if (updates.status === 'resolved' || updates.status === 'closed') {
           await sendTicketResolvedEmail(item);
+          
+          // Auto-create KB article from resolved ticket
+          try {
+            console.log('📚 Attempting to auto-create KB article from resolved ticket...');
+            const kbArticle = await createKBFromResolvedTicket(item);
+            if (kbArticle) {
+              console.log('✅ KB article auto-created:', kbArticle._id);
+            }
+          } catch (kbError) {
+            console.error('⚠️ KB auto-update failed (non-blocking):', kbError.message);
+            // Don't fail the ticket update if KB creation fails
+          }
         } else if (Object.keys(updates).length > 0) {
           await sendTicketUpdateEmail(item, updates);
         }
@@ -425,6 +466,7 @@ createCRUDRoutes(ChatConversation, 'ChatConversation');
 createCRUDRoutes(ChatMessage, 'ChatMessage');
 createCRUDRoutes(KnowledgeBaseItem, 'KnowledgeBaseItem');
 createCRUDRoutes(CannedResponse, 'CannedResponse');
+createCRUDRoutes(User, 'User');
 
 // Get conversation history for a customer
 router.get('/chat/history', authenticateToken, async (req, res) => {

@@ -1,157 +1,367 @@
 const express = require('express');
-const { authenticateToken } = require('./auth');
-
 const router = express.Router();
+const { body, param, validationResult } = require('express-validator');
+const Integration = require('../models/Integration');
+const Ticket = require('../models/Ticket');
+const {
+  SlackIntegration,
+  TeamsIntegration,
+  ZapierIntegration,
+  StripeIntegration,
+  JiraIntegration
+} = require('../utils/integrations');
+const crypto = require('crypto');
 
-// Mock integration endpoints to match base44 interface
-router.post('/core/invoke-llm', authenticateToken, async (req, res) => {
+// Create integration
+router.post('/', [
+  body('workspace_id').isMongoId(),
+  body('integration_type').isIn(['slack', 'teams', 'zapier', 'stripe', 'jira']),
+  body('name').notEmpty().trim(),
+  body('config').isObject()
+], async (req, res) => {
   try {
-    const { prompt, response_json_schema } = req.body;
-    
-    if (!prompt) {
-      return res.status(400).json({ error: 'Prompt is required' });
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
     }
 
-    // This endpoint redirects to the AI test endpoint
-    // In a real implementation, this would be the main LLM integration
-    res.json({
-      success: true,
-      response: 'This is a mock LLM response. Use the /api/ai/test endpoint for real OpenAI integration.',
-      confidence: 0.9,
-      model: 'mock-model'
-    });
-  } catch (error) {
-    console.error('LLM Integration error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
+    const { workspace_id, integration_type, name, config, notification_settings } = req.body;
+    const created_by = req.user?.id;
 
-// File upload integration
-router.post('/core/upload-file', authenticateToken, async (req, res) => {
-  try {
-    // Mock file upload
-    res.json({
-      success: true,
-      fileId: `mock-file-${Date.now()}`,
-      url: 'https://example.com/uploaded-file.pdf',
-      message: 'File upload endpoint (mock)'
-    });
-  } catch (error) {
-    console.error('File upload error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Email integration
-router.post('/core/send-email', authenticateToken, async (req, res) => {
-  try {
-    const { to, subject, body } = req.body;
-    
-    if (!to || !subject || !body) {
-      return res.status(400).json({ error: 'Email to, subject, and body are required' });
+    if (!created_by) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    // Mock email sending
-    console.log('Mock email sent:', { to, subject, body });
-    
-    res.json({
-      success: true,
-      message: 'Email sent successfully (mock)',
-      messageId: `mock-email-${Date.now()}`
+    // Check if integration already exists
+    const existing = await Integration.findOne({
+      workspace_id,
+      integration_type,
+      is_enabled: true
     });
-  } catch (error) {
-    console.error('Email integration error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
-// Image generation integration
-router.post('/core/generate-image', authenticateToken, async (req, res) => {
-  try {
-    const { prompt, size = '1024x1024' } = req.body;
-    
-    if (!prompt) {
-      return res.status(400).json({ error: 'Image prompt is required' });
+    if (existing && integration_type !== 'custom') {
+      return res.status(400).json({ 
+        error: `${integration_type} integration already exists` 
+      });
     }
 
-    // Mock image generation
-    res.json({
-      success: true,
-      imageUrl: 'https://via.placeholder.com/1024x1024.png?text=Mock+Generated+Image',
-      prompt: prompt,
-      size: size,
-      message: 'Image generation endpoint (mock)'
-    });
-  } catch (error) {
-    console.error('Image generation error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Data extraction from uploaded files
-router.post('/core/extract-data-from-uploaded-file', authenticateToken, async (req, res) => {
-  try {
-    const { fileId } = req.body;
-    
-    if (!fileId) {
-      return res.status(400).json({ error: 'File ID is required' });
-    }
-
-    // Mock data extraction
-    res.json({
-      success: true,
-      extractedData: {
-        text: 'This is mock extracted text from the uploaded file.',
-        metadata: {
-          pages: 1,
-          words: 10,
-          fileType: 'pdf'
-        }
+    const integration = new Integration({
+      workspace_id,
+      integration_type,
+      name,
+      config,
+      notification_settings: notification_settings || {
+        notify_on_ticket_created: true,
+        notify_on_ticket_resolved: true,
+        notify_on_escalation: true,
+        notify_on_agent_mention: true,
+        notify_threshold_priority: 'high'
       },
-      fileId: fileId,
-      message: 'Data extraction endpoint (mock)'
+      created_by,
+      sync_status: {
+        sync_interval: 5,
+        is_syncing: false
+      }
     });
-  } catch (error) {
-    console.error('Data extraction error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
-// Create signed URL for file upload
-router.post('/core/create-file-signed-url', authenticateToken, async (req, res) => {
-  try {
-    const { filename, contentType } = req.body;
-    
-    if (!filename) {
-      return res.status(400).json({ error: 'Filename is required' });
+    await integration.save();
+
+    // Test connection
+    let testResult = null;
+    try {
+      if (integration_type === 'slack') {
+        const slack = new SlackIntegration(config);
+        testResult = await slack.sendNotification('SupportAI: Integration test successful ✓');
+      } else if (integration_type === 'teams') {
+        const teams = new TeamsIntegration(config);
+        testResult = await teams.sendNotification(
+          'SupportAI Integration Test',
+          'Your Teams integration has been successfully connected!'
+        );
+      }
+    } catch (testError) {
+      console.warn('Integration test warning:', testError.message);
     }
 
-    // Mock signed URL generation
-    res.json({
+    res.status(201).json({
       success: true,
-      signedUrl: `https://example.com/upload/${filename}?signature=mock-signature`,
-      filename: filename,
-      expiresIn: 3600,
-      message: 'Signed URL generation endpoint (mock)'
+      integration,
+      test_result: testResult
     });
   } catch (error) {
-    console.error('Signed URL error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Integration creation error:', error);
+    res.status(500).json({ error: 'Failed to create integration' });
   }
 });
 
-// Upload private file
-router.post('/core/upload-private-file', authenticateToken, async (req, res) => {
+// Get integrations for workspace
+router.get('/workspace/:workspaceId', [
+  param('workspaceId').isMongoId()
+], async (req, res) => {
   try {
-    // Mock private file upload
+    const { workspaceId } = req.params;
+
+    const integrations = await Integration.find({ workspace_id: workspaceId })
+      .select('-api_key -api_secret -oauth_token -webhook_secret')
+      .populate('created_by', 'name email');
+
     res.json({
-      success: true,
-      fileId: `mock-private-file-${Date.now()}`,
-      message: 'Private file upload endpoint (mock)'
+      workspace_id: workspaceId,
+      integrations,
+      count: integrations.length
     });
   } catch (error) {
-    console.error('Private file upload error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Integration fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch integrations' });
+  }
+});
+
+// Get single integration
+router.get('/:integrationId', [
+  param('integrationId').isMongoId()
+], async (req, res) => {
+  try {
+    const { integrationId } = req.params;
+
+    const integration = await Integration.findById(integrationId)
+      .select('-api_key -api_secret -oauth_token -webhook_secret')
+      .populate('created_by', 'name email');
+
+    if (!integration) {
+      return res.status(404).json({ error: 'Integration not found' });
+    }
+
+    res.json({ integration });
+  } catch (error) {
+    console.error('Integration fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch integration' });
+  }
+});
+
+// Update integration
+router.put('/:integrationId', [
+  param('integrationId').isMongoId(),
+  body('name').optional().notEmpty().trim(),
+  body('config').optional().isObject(),
+  body('is_enabled').optional().isBoolean(),
+  body('notification_settings').optional().isObject()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { integrationId } = req.params;
+    const { name, config, is_enabled, notification_settings } = req.body;
+
+    const integration = await Integration.findById(integrationId);
+    if (!integration) {
+      return res.status(404).json({ error: 'Integration not found' });
+    }
+
+    if (name) integration.name = name;
+    if (config) integration.config = { ...integration.config, ...config };
+    if (is_enabled !== undefined) integration.is_enabled = is_enabled;
+    if (notification_settings) {
+      integration.notification_settings = {
+        ...integration.notification_settings,
+        ...notification_settings
+      };
+    }
+
+    await integration.save();
+
+    res.json({
+      success: true,
+      integration
+    });
+  } catch (error) {
+    console.error('Integration update error:', error);
+    res.status(500).json({ error: 'Failed to update integration' });
+  }
+});
+
+// Test integration connection
+router.post('/:integrationId/test', [
+  param('integrationId').isMongoId()
+], async (req, res) => {
+  try {
+    const { integrationId } = req.params;
+
+    const integration = await Integration.findById(integrationId);
+    if (!integration) {
+      return res.status(404).json({ error: 'Integration not found' });
+    }
+
+    let testResult = null;
+    let error = null;
+
+    try {
+      if (integration.integration_type === 'slack') {
+        const slack = new SlackIntegration(integration.config);
+        testResult = await slack.sendNotification('SupportAI: Connection test ✓');
+      } else if (integration.integration_type === 'teams') {
+        const teams = new TeamsIntegration(integration.config);
+        testResult = await teams.sendNotification(
+          'SupportAI Connection Test',
+          'Your integration is connected successfully!'
+        );
+      } else if (integration.integration_type === 'zapier') {
+        const zapier = new ZapierIntegration(integration.config);
+        testResult = await zapier.sendEvent('test', { message: 'Connection test' });
+      }
+    } catch (testError) {
+      error = testError.message;
+    }
+
+    res.json({
+      success: !error,
+      test_result: testResult,
+      error
+    });
+  } catch (error) {
+    console.error('Integration test error:', error);
+    res.status(500).json({ error: 'Failed to test integration' });
+  }
+});
+
+// Send test notification
+router.post('/:integrationId/test-notification', [
+  param('integrationId').isMongoId(),
+  body('notification_type').isIn(['ticket', 'message', 'escalation'])
+], async (req, res) => {
+  try {
+    const { integrationId } = req.params;
+    const { notification_type } = req.body;
+
+    const integration = await Integration.findById(integrationId);
+    if (!integration) {
+      return res.status(404).json({ error: 'Integration not found' });
+    }
+
+    let result = null;
+
+    if (integration.integration_type === 'slack') {
+      const slack = new SlackIntegration(integration.config);
+      const testTicket = {
+        _id: 'test',
+        ticket_number: 'TEST-001',
+        title: 'Test Ticket - Please Ignore',
+        customer_name: 'Test User',
+        priority: 'high',
+        status: 'open',
+        category: 'test'
+      };
+      result = await slack.sendTicketNotification(testTicket);
+    } else if (integration.integration_type === 'teams') {
+      const teams = new TeamsIntegration(integration.config);
+      result = await teams.sendTicketNotification({
+        _id: 'test',
+        ticket_number: 'TEST-001',
+        title: 'Test Ticket - Please Ignore',
+        customer_name: 'Test User',
+        customer_email: 'test@example.com',
+        priority: 'high',
+        status: 'open',
+        category: 'test'
+      });
+    }
+
+    res.json({
+      success: true,
+      result
+    });
+  } catch (error) {
+    console.error('Notification test error:', error);
+    res.status(500).json({ error: 'Failed to send test notification' });
+  }
+});
+
+// Delete integration
+router.delete('/:integrationId', [
+  param('integrationId').isMongoId()
+], async (req, res) => {
+  try {
+    const { integrationId } = req.params;
+
+    const integration = await Integration.findById(integrationId);
+    if (!integration) {
+      return res.status(404).json({ error: 'Integration not found' });
+    }
+
+    await Integration.findByIdAndDelete(integrationId);
+
+    res.json({
+      success: true,
+      message: 'Integration deleted'
+    });
+  } catch (error) {
+    console.error('Integration delete error:', error);
+    res.status(500).json({ error: 'Failed to delete integration' });
+  }
+});
+
+// Webhook handler for receiving events from integrations
+router.post('/webhook/:integrationId/:webhookSecret', [
+  param('integrationId').isMongoId(),
+  param('webhookSecret').isString()
+], async (req, res) => {
+  try {
+    const { integrationId, webhookSecret } = req.params;
+
+    const integration = await Integration.findById(integrationId);
+    if (!integration || integration.webhook_secret !== webhookSecret) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { event_type, data } = req.body;
+
+    // Handle different webhook events
+    if (integration.integration_type === 'slack') {
+      // Handle Slack events
+      console.log(`Slack webhook: ${event_type}`, data);
+    } else if (integration.integration_type === 'teams') {
+      // Handle Teams events
+      console.log(`Teams webhook: ${event_type}`, data);
+    } else if (integration.integration_type === 'jira') {
+      // Handle Jira events
+      console.log(`Jira webhook: ${event_type}`, data);
+    }
+
+    // Update usage metrics
+    integration.usage.webhooks_received += 1;
+    await integration.save();
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Webhook handler error:', error);
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// Get integration usage statistics
+router.get('/:integrationId/stats', [
+  param('integrationId').isMongoId()
+], async (req, res) => {
+  try {
+    const { integrationId } = req.params;
+
+    const integration = await Integration.findById(integrationId);
+    if (!integration) {
+      return res.status(404).json({ error: 'Integration not found' });
+    }
+
+    res.json({
+      integration_id: integrationId,
+      integration_type: integration.integration_type,
+      usage: integration.usage,
+      sync_status: integration.sync_status,
+      is_enabled: integration.is_enabled
+    });
+  } catch (error) {
+    console.error('Stats fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });
 

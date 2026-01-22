@@ -33,6 +33,22 @@ const chatConversationSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  session_id: {
+    type: String,
+    default: null,
+    index: true
+  },
+  is_new_session: {
+    type: Boolean,
+    default: true
+  },
+  previous_sessions: [{
+    session_id: String,
+    conversation_id: mongoose.Schema.Types.ObjectId,
+    started_at: Date,
+    ended_at: Date,
+    message_count: Number
+  }],
   tags: [{
     type: String
   }],

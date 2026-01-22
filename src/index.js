@@ -11,6 +11,11 @@ const aiRoutes = require('./routes/ai');
 const entityRoutes = require('./routes/entities');
 const integrationRoutes = require('./routes/integrations');
 const widgetRoutes = require('./routes/widget');
+const kbRoutes = require('./routes/knowledgebase');
+const chatRoutes = require('./routes/chat');
+const collaborationRoutes = require('./routes/collaboration');
+const leaderboardRoutes = require('./routes/leaderboard');
+const kbAutoUpdateRoutes = require('./routes/kb-auto-update');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -105,6 +110,11 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/entities', entityRoutes);
 app.use('/api/integrations', integrationRoutes);
 app.use('/api/widget', widgetRoutes);
+app.use('/api/kb', kbRoutes);
+app.use('/api/chat', chatRoutes);
+app.use('/api/collaboration', collaborationRoutes);
+app.use('/api/leaderboard', leaderboardRoutes);
+app.use('/api/kb-auto-update', kbAutoUpdateRoutes);
 
 // Default route
 app.get('/', (req, res) => {
@@ -116,7 +126,13 @@ app.get('/', (req, res) => {
       '/api/auth',
       '/api/ai',
       '/api/entities',
-      '/api/integrations'
+      '/api/integrations',
+      '/api/widget',
+      '/api/kb',
+      '/api/chat',
+      '/api/collaboration',
+      '/api/leaderboard',
+      '/api/kb-auto-update'
     ]
   });
 });

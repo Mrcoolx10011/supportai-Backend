@@ -6,6 +6,11 @@ const chatMessageSchema = new mongoose.Schema({
     ref: 'ChatConversation',
     required: true
   },
+  session_id: {
+    type: String,
+    default: null,
+    index: true
+  },
   sender_type: {
     type: String,
     enum: ['client', 'customer', 'agent', 'ai', 'bot', 'system'],

@@ -20,7 +20,7 @@ const knowledgeBaseItemSchema = new mongoose.Schema({
   status: {
     type: String,
     enum: ['draft', 'published', 'archived'],
-    default: 'draft'
+    default: 'published'
   },
   author_id: {
     type: mongoose.Schema.Types.ObjectId,
